@@ -50,3 +50,6 @@ rsconnect/
 
 # macOS
 .DS_Store
+
+# Local checkpoint too large for GitHub (>100 MB)
+data/checkpoint_raw data.RData
