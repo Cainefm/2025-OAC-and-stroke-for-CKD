@@ -1,5 +1,166 @@
 # 00_functions_pd_oac.R — helpers for sequential PD + AF + OAC emulation
-# Sourced by 01_build_seqcohort.R and 02_analysis_primary.R
+# Sourced by 01_build_seqcohort.R, 02_analysis_primary.R, 03_regression_pooled_logistic.R
+
+#' Working directory must be project root (folder `data/` exists).
+project_root <- function() {
+  if (!dir.exists("data")) {
+    stop("Set working directory to project root (folder data/ missing).")
+  }
+  "."
+}
+
+#' CHA2DS2-VASc components from `age_indx` (years) and comorbidity columns on `dt`.
+compute_chadsvas_score <- function(dt) {
+  dt[, chadsvas_score := dplyr::case_when(
+    age_indx < 65 ~ 0,
+    age_indx >= 65 & age_indx < 75 ~ 1,
+    age_indx > 75 ~ 2
+  ) + ifelse(Sex == "F", 1L, 0L) + dx.chf + dx.htn + dx.cbd +
+    dx.stroke_embo * 2L + dx.pvd + dx.dm]
+  invisible(dt)
+}
+
+#' Factor columns for TableOne (continuous vars excluded).
+tableone_factor_vars <- function(vars) {
+  setdiff(vars, c("fu", "trial_id", "chadsvas_score", "age_indx", "time_af_index"))
+}
+
+#' Read seqcohort list and attach `trial_id` per trial.
+read_seqcohort_with_trial_ids <- function(path) {
+  seqcohort <- readRDS(path)
+  lapply(seq_along(seqcohort), function(i) {
+    df <- seqcohort[[i]]
+    df$trial_id <- i
+    df
+  })
+}
+
+#' Cached monthly antiplatelet at index (same file as 01 saves next to seqcohort).
+load_or_build_antiplatelet_monthly <- function(cfg, root) {
+  ap_path <- sub("\\.RDS$", "_antiplatelet.RDS", cfg$path_seqcohort_rds)
+  ap_full <- file.path(root, ap_path)
+  if (file.exists(ap_full)) {
+    return(readRDS(ap_full))
+  }
+  message("Rebuilding antiplatelet from drug RDS (run 01 to cache).")
+  rx <- readRDS(file.path(root, cfg$path_drug_rds))
+  data.table::setDT(rx)
+  prepare_antiplatelet(rx, collapse_to_month = (cfg$index_by == "month"))
+}
+
+#' Merge antiplatelet at index date; result column `antiplatelet.baseline` 0/1.
+merge_antiplatelet_baseline_at_index <- function(person_trial, drug_ap) {
+  out <- merge(
+    person_trial,
+    drug_ap,
+    by.x = c("Reference_Key", "indx_date"),
+    by.y = c("Reference_Key", "Date"),
+    all.x = TRUE
+  )
+  data.table::setnames(out, "antiplatelet", "antiplatelet.baseline")
+  out[, antiplatelet.baseline := ifelse(
+    is.na(antiplatelet.baseline), 0L, as.integer(antiplatelet.baseline)
+  )]
+  out
+}
+
+#' Ensure `antiplatelet.baseline` on wide `person_trial` (for 02 / 03).
+ensure_antiplatelet_baseline_wide <- function(person_trial, cfg, root) {
+  if ("antiplatelet" %in% names(person_trial) &&
+        !"antiplatelet.baseline" %in% names(person_trial)) {
+    person_trial[, antiplatelet.baseline := as.integer(antiplatelet)]
+    person_trial[, antiplatelet := NULL]
+  }
+  if (!"antiplatelet.baseline" %in% names(person_trial)) {
+    message("Adding antiplatelet.baseline from drug file (merge at indx_date).")
+    rx_fix <- readRDS(file.path(root, cfg$path_drug_rds))
+    data.table::setDT(rx_fix)
+    drug_ap_idx <- prepare_antiplatelet(
+      rx_fix,
+      collapse_to_month = (cfg$index_by == "month")
+    )
+    person_trial <- merge(
+      person_trial,
+      drug_ap_idx,
+      by.x = c("Reference_Key", "indx_date"),
+      by.y = c("Reference_Key", "Date"),
+      all.x = TRUE
+    )
+    person_trial[, antiplatelet.baseline := ifelse(is.na(antiplatelet), 0L, 1L)]
+    if ("antiplatelet" %in% names(person_trial)) {
+      person_trial[, antiplatelet := NULL]
+    }
+  }
+  person_trial[, antiplatelet.baseline := ifelse(
+    is.na(antiplatelet.baseline), 0L, as.integer(antiplatelet.baseline)
+  )]
+  person_trial
+}
+
+#' Map one TableOne row name (`rn`) to a column name in `data_names`.
+#' Strips factor levels and continuous summaries so formulas do not parse
+#' `var (mean (SD))` as a call to `var`.
+sanitize_tableone_rn <- function(rn, data_names) {
+  if (length(rn) != 1L) {
+    return(NA_character_)
+  }
+  s <- as.character(rn)[1L]
+  if (is.na(s) || !nzchar(trimws(s))) {
+    return(NA_character_)
+  }
+  s <- gsub(" = [01] \\(%\\)", "", s)
+  s <- gsub(" = [MN] \\(%\\)", "", s)
+  s <- gsub(" \\(mean \\(SD\\)\\)", "", s)
+  s <- gsub(" \\(median.*\\)", "", s, perl = TRUE)
+  s <- sub("\\s*\\(.*$", "", s)
+  s <- trimws(s)
+  if (!nzchar(s)) {
+    return(NA_character_)
+  }
+  if (s %in% data_names) {
+    return(s)
+  }
+  s2 <- gsub(".baseline", "", s, fixed = TRUE)
+  if (s2 %in% data_names) {
+    return(s2)
+  }
+  NA_character_
+}
+
+#' Vector of `rn` values -> unique valid `data_names` (SMD > threshold picks).
+clean_unbalanced_from_tableone_rn <- function(rn_vec, data_names) {
+  if (length(rn_vec) == 0L) {
+    return(character(0))
+  }
+  rn_vec <- as.character(rn_vec)
+  out <- vapply(
+    rn_vec,
+    sanitize_tableone_rn,
+    character(1L),
+    data_names = data_names,
+    USE.NAMES = FALSE
+  )
+  out <- out[!is.na(out) & nzchar(out)]
+  unique(out)
+}
+
+#' TableOne SMD matrix as `data.table` (console table suppressed).
+tableone_smd_to_dt <- function(tab_obj, nonnormal = NULL, var_labels = TRUE) {
+  args <- list(
+    x = tab_obj,
+    smd = TRUE,
+    varLabels = var_labels,
+    printToggle = FALSE
+  )
+  if (length(nonnormal) > 0L) {
+    args$nonnormal <- nonnormal
+  }
+  smd_mat <- do.call(print, args)
+  as.data.table(
+    as.data.frame(smd_mat, stringsAsFactors = FALSE),
+    keep.rownames = TRUE
+  )
+}
 
 #' Build calendar index dates from config
 build_index_dates <- function(cfg) {
@@ -45,10 +206,22 @@ prepare_antiplatelet <- function(rx, collapse_to_month) {
               Prescription_Start_Date = ymd(Prescription_Start_Date),
               Prescription_End_Date = ymd(Prescription_End_Date))]
   out <- out[!is.na(Prescription_End_Date)]
-  out <- out[, .(
-    Date = seq(Prescription_Start_Date, Prescription_End_Date, by = "day")
-  ), by = .(Reference_Key, Prescription_Start_Date, Prescription_End_Date)]
-  out <- unique(out[, .(Reference_Key, Date, antiplatelet = 1L)])
+  out <- out[Prescription_Start_Date <= Prescription_End_Date]
+  # Same-day vs multi-day: grouped seq() can mix Date storage (int/double) in j
+  same_day <- out[Prescription_Start_Date == Prescription_End_Date,
+                  .(Reference_Key,
+                    Date = as.Date(Prescription_Start_Date),
+                    antiplatelet = 1L)]
+  multi_day <- out[Prescription_Start_Date < Prescription_End_Date,
+                   .(Date = as.Date(seq(
+                     Prescription_Start_Date[1L],
+                     Prescription_End_Date[1L],
+                     by = "day"
+                   ))),
+                   by = .(Reference_Key, Prescription_Start_Date, Prescription_End_Date)]
+  multi_day[, antiplatelet := 1L]
+  multi_day <- multi_day[, .(Reference_Key, Date, antiplatelet)]
+  out <- unique(rbindlist(list(same_day, multi_day), use.names = TRUE))
   if (isTRUE(collapse_to_month)) {
     out[, Date := ymd(paste0(substring(Date, 1L, 7L), "-01"))]
     out <- unique(out)
@@ -106,8 +279,9 @@ make_run_seq <- function(cfg, dx, covar, drug_oac) {
     each_trial_PD_AF <- each_trial_PD_AF[date.af >= date.PD]
 
     if (cfg$exposure_mode == "manuscript_initiator") {
+      m_prev <- cfg$oac_prevalent_exclusion_months
       id_prev_oac <- each_trial_PD_AF[
-        date.oac <= indx_date %m-% months(1L), Reference_Key]
+        date.oac <= indx_date %m-% months(m_prev), Reference_Key]
       base_af <- each_trial_PD_AF[!Reference_Key %in% id_prev_oac]
     } else if (cfg$exposure_mode == "current_oac_interval") {
       base_af <- each_trial_PD_AF
@@ -123,8 +297,9 @@ make_run_seq <- function(cfg, dx, covar, drug_oac) {
     each_trial_PD_AF_rmpastOAC_NoOutcome_NoPastHx <- data.table::copy(base2)
 
     if (cfg$exposure_mode == "manuscript_initiator") {
+      m_new <- cfg$oac_initiation_lookback_months
       each_trial_PD_AF_rmpastOAC_NoOutcome_NoPastHx[, expo := as.integer(
-        (date.oac > indx_date %m-% months(1L) & date.oac <= indx_date) &
+        (date.oac > indx_date %m-% months(m_new) & date.oac <= indx_date) &
           !is.na(date.oac))]
     } else {
       if (is.null(drug_oac) || nrow(drug_oac) == 0L) {
@@ -161,7 +336,9 @@ make_run_seq <- function(cfg, dx, covar, drug_oac) {
       by = "Reference_Key"
     )
 
-    each_trial_px <- each_trial_px[dx.stroke_embo == 0L]
+    if (isTRUE(cfg$cohort_exclude_dx_stroke_embo)) {
+      each_trial_px <- each_trial_px[dx.stroke_embo == 0L]
+    }
 
     each_trial_dx <- dx[
       Reference_Key %in%

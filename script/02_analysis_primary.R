@@ -2,6 +2,11 @@
 # Run from project root after 01_build_seqcohort.R:
 #   Rscript script/02_analysis_primary.R
 # Uses script/analysis_config.R for paths and follow-up cap.
+#
+# pipeline_style "run_incident" mirrors script/run_incident.R (out_indicator == 1):
+#   pt.allstroke == 0, obs_end includes date.ische/haem/death, Table 1 omits
+#   dx.stroke_embo before match, MatchIt: fu in PS, no stroke_embo, replace=F,
+#   exact ~ trial_id, no caliper.
 
 options(scipen = 6L, digits = 4L)
 if (.Platform$OS.type == "windows") {
@@ -18,18 +23,16 @@ suppressPackageStartupMessages({
   library(readxl)
 })
 
-root <- if (dir.exists("data")) "." else stop("Set working directory to project root.")
+source("script/00_functions_pd_oac.R")
+root <- project_root()
 
 source(file.path(root, "script/analysis_config.R"))
 cfg <- load_analysis_config(root = root)
-source(file.path(root, "script/00_functions_pd_oac.R"))
+message("pipeline_style: ", cfg$pipeline_style)
 
-seqcohort <- readRDS(file.path(root, cfg$path_seqcohort_rds))
-seqcohort <- lapply(seq_along(seqcohort), function(i) {
-  df <- seqcohort[[i]]
-  df$trial_id <- i
-  df
-})
+seqcohort <- read_seqcohort_with_trial_ids(
+  file.path(root, cfg$path_seqcohort_rds)
+)
 
 person_trial <- rbindlist(seqcohort)
 person_trial[, id := paste(trial_id, Reference_Key, sep = "-")]
@@ -43,52 +46,68 @@ person_trial <- merge(
 setkey(person_trial, NULL)
 person_trial[, id := paste(trial_id, Reference_Key, sep = "_")]
 
+# Past stroke exclusion (script/run_incident.R): prefer cohort column pt.allstroke.
+if (cfg$pipeline_style == "run_incident") {
+  if ("pt.allstroke" %in% names(person_trial)) {
+    n_ex <- person_trial[pt.allstroke == 1L, .N]
+    message("run_incident: excluding pt.allstroke == 1 (n = ", n_ex, ")")
+    person_trial <- person_trial[pt.allstroke == 0L]
+  } else if ("dx.stroke_embo" %in% names(person_trial)) {
+    n_ex <- person_trial[dx.stroke_embo == 1L, .N]
+    message(
+      "run_incident: cohort has no pt.allstroke; excluding dx.stroke_embo == 1 ",
+      "(n = ", n_ex, ") as stroke-history proxy — for exact run_incident parity, ",
+      "include pt.allstroke on the cohort RDS."
+    )
+    person_trial <- person_trial[dx.stroke_embo == 0L]
+  } else {
+    warning(
+      "run_incident style: neither pt.allstroke nor dx.stroke_embo found; ",
+      "stroke history not excluded (differs from script/run_incident.R)."
+    )
+  }
+}
+
 cap_years <- cfg$obs_end_cap_years
-person_trial[, obs_end := pmin(
-  ymd("2022-12-31"),
-  date.stroke,
-  date.death,
-  date.hd,
-  date.transplant,
-  indx_date %m+% years(cap_years),
-  date.PD.end,
-  na.rm = TRUE
-)]
+study_end <- as.Date(cfg$study_end)
+if (cfg$pipeline_style == "run_incident") {
+  person_trial[, obs_end := pmin(
+    study_end,
+    date.ische,
+    date.haem,
+    date.death,
+    date.hd,
+    date.transplant,
+    indx_date %m+% years(cap_years),
+    date.PD.end,
+    na.rm = TRUE
+  )]
+} else {
+  person_trial[, obs_end := pmin(
+    study_end,
+    date.stroke,
+    date.death,
+    date.hd,
+    date.transplant,
+    indx_date %m+% years(cap_years),
+    date.PD.end,
+    na.rm = TRUE
+  )]
+}
 
 person_trial[, age_indx := as.numeric((indx_date - ymd(dob)) / 365.25)]
 person_trial[, time_af_index := as.numeric(indx_date - date.af)]
-person_trial[, chadsvas_score := dplyr::case_when(
-  age_indx < 65 ~ 0,
-  age_indx >= 65 & age_indx < 75 ~ 1,
-  age_indx > 75 ~ 2
-) + ifelse(Sex == "F", 1L, 0L) + dx.chf + dx.htn + dx.cbd +
-  dx.stroke_embo * 2L + dx.pvd + dx.dm]
+compute_chadsvas_score(person_trial)
 
 person_trial[, fu := as.numeric(obs_end - indx_date)]
 
-ap_path <- sub("\\.RDS$", "_antiplatelet.RDS", cfg$path_seqcohort_rds)
-if (!file.exists(file.path(root, ap_path))) {
-  message("Rebuilding antiplatelet from drug RDS (run 01 to cache).")
-  rx <- readRDS(file.path(root, cfg$path_drug_rds))
-  setDT(rx)
-  collapse_ap <- (cfg$index_by == "month")
-  drug_antiplatelet <- prepare_antiplatelet(rx, collapse_to_month = collapse_ap)
-} else {
-  drug_antiplatelet <- readRDS(file.path(root, ap_path))
-}
-
-person_trial <- merge(
+drug_antiplatelet <- load_or_build_antiplatelet_monthly(cfg, root)
+person_trial <- merge_antiplatelet_baseline_at_index(
   person_trial,
-  drug_antiplatelet,
-  by.x = c("Reference_Key", "indx_date"),
-  by.y = c("Reference_Key", "Date"),
-  all.x = TRUE
+  drug_antiplatelet
 )
-setnames(person_trial, "antiplatelet", "antiplatelet.baseline")
-person_trial[, antiplatelet.baseline := ifelse(
-  is.na(antiplatelet.baseline), 0L, antiplatelet.baseline)]
 
-vars <- c(
+vars_default <- c(
   "fu", "Sex", "age_indx", "time_af_index", "chadsvas_score",
   "dx.chf", "dx.mi", "dx.pvd", "dx.cbd", "dx.copd",
   "dx.dementia", "dx.paralysis", "dx.dm", "dx.crf", "dx.liver_mild",
@@ -96,6 +115,15 @@ vars <- c(
   "dx.ra", "dx.aids", "dx.cancer", "dx.cancer_mets", "dx.dm_com0",
   "dx.dm_com1", "dx.htn", "dx.constipation", "antiplatelet.baseline"
 )
+vars_run_incident <- c(
+  "fu", "Sex", "age_indx", "time_af_index", "chadsvas_score",
+  "dx.chf", "dx.mi", "dx.pvd", "dx.cbd", "dx.copd",
+  "dx.dementia", "dx.paralysis", "dx.dm", "dx.crf", "dx.liver_mild",
+  "dx.liver_modsev", "dx.ulcers", "dx.asthma",
+  "dx.ra", "dx.aids", "dx.cancer", "dx.cancer_mets", "dx.dm_com0",
+  "dx.dm_com1", "dx.htn", "dx.constipation", "antiplatelet.baseline"
+)
+vars <- if (cfg$pipeline_style == "run_incident") vars_run_incident else vars_default
 
 covar <- setDT(readxl::read_xlsx(
   file.path(root, cfg$path_protocol_xlsx),
@@ -115,13 +143,10 @@ var_label(person_trial[["antiplatelet.baseline"]]) <- "Antiplatelet user history
 var_label(person_trial[["fu"]]) <- "Follow-up period"
 var_label(person_trial)
 
-notnormal <- c("age_indx", "time_af_index", "fu")
+notnormal <- intersect(c("age_indx", "time_af_index", "fu"), vars)
 tabone <- CreateTableOne(
   vars = vars,
-  factorVars = setdiff(vars, c(
-    "fu", "trial_id", "chadsvas_score",
-    "age_indx", "time_af_index"
-  )),
+  factorVars = tableone_factor_vars(vars),
   strata = "expo",
   data = person_trial,
   test = FALSE
@@ -139,30 +164,45 @@ write.csv(
 )
 
 set.seed(cfg$matchit_seed)
-match_formula <- as.formula(paste(
-  "expo ~ Sex + age_indx + dx.chf + dx.mi + dx.pvd + dx.cbd + dx.copd +",
-  "dx.dementia + dx.paralysis + dx.dm + dx.crf + dx.liver_mild +",
-  "dx.liver_modsev + dx.ulcers + dx.stroke_embo + dx.asthma + dx.ra +",
-  "dx.aids + dx.cancer + dx.cancer_mets + dx.dm_com0 + dx.dm_com1 +",
-  "dx.htn + dx.constipation + time_af_index + chadsvas_score"
-))
-m.out <- matchit(
-  match_formula,
-  data = person_trial,
-  replace = cfg$matchit_replace,
-  method = "nearest",
-  caliper = cfg$matchit_caliper,
-  ratio = cfg$matchit_ratio
-)
+if (cfg$pipeline_style == "run_incident") {
+  match_formula <- as.formula(paste(
+    "expo ~ Sex + age_indx + dx.chf + dx.mi + dx.pvd + dx.cbd + dx.copd +",
+    "dx.dementia + dx.paralysis + dx.dm + dx.crf + dx.liver_mild +",
+    "dx.liver_modsev + dx.ulcers + dx.asthma + dx.ra + dx.aids + dx.cancer +",
+    "dx.cancer_mets + dx.dm_com0 + dx.dm_com1 + dx.htn + dx.constipation +",
+    "time_af_index + chadsvas_score + fu"
+  ))
+  m.out <- matchit(
+    match_formula,
+    data = person_trial,
+    replace = FALSE,
+    method = "nearest",
+    ratio = cfg$matchit_ratio,
+    exact = ~ trial_id
+  )
+} else {
+  match_formula <- as.formula(paste(
+    "expo ~ Sex + age_indx + dx.chf + dx.mi + dx.pvd + dx.cbd + dx.copd +",
+    "dx.dementia + dx.paralysis + dx.dm + dx.crf + dx.liver_mild +",
+    "dx.liver_modsev + dx.ulcers + dx.stroke_embo + dx.asthma + dx.ra +",
+    "dx.aids + dx.cancer + dx.cancer_mets + dx.dm_com0 + dx.dm_com1 +",
+    "dx.htn + dx.constipation + time_af_index + chadsvas_score"
+  ))
+  m.out <- matchit(
+    match_formula,
+    data = person_trial,
+    replace = cfg$matchit_replace,
+    method = "nearest",
+    caliper = cfg$matchit_caliper,
+    ratio = cfg$matchit_ratio
+  )
+}
 print(summary(m.out))
 
 person_trial <- match.data(m.out)
 tabone2 <- CreateTableOne(
   vars = vars,
-  factorVars = setdiff(vars, c(
-    "fu", "trial_id", "chadsvas_score",
-    "age_indx", "time_af_index"
-  )),
+  factorVars = tableone_factor_vars(vars),
   strata = "expo",
   data = person_trial,
   test = FALSE

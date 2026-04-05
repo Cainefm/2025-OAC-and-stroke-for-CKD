@@ -17,15 +17,11 @@ suppressPackageStartupMessages({
   library(tibble)
 })
 
-root <- if (dir.exists("data")) {
-  "."
-} else {
-  stop("Run 01_build_seqcohort.R with working directory = project root (data/ missing).")
-}
+source("script/00_functions_pd_oac.R")
+root <- project_root()
 
 source(file.path(root, "script/analysis_config.R"))
 cfg <- load_analysis_config(root = root)
-source(file.path(root, "script/00_functions_pd_oac.R"))
 
 cohort <- setDT(readRDS(file.path(root, cfg$path_cohort_rds)))
 ymd_cols <- grep("date", names(cohort), value = TRUE)
@@ -62,6 +58,8 @@ message(
   "Building seqcohort: mode=", cfg$exposure_mode,
   ", index_by=", cfg$index_by,
   ", n_index=", length(index_date),
+  ", oac_init_months=", cfg$oac_initiation_lookback_months,
+  ", exclude_dx_stroke_embo=", cfg$cohort_exclude_dx_stroke_embo,
   ", output=", cfg$path_seqcohort_rds
 )
 
