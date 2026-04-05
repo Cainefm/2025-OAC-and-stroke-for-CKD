@@ -6,7 +6,7 @@
 
 `script/run.R` was **not** modified. As it stands, it implements **daily** index dates and **current OAC** exposure (prescription intervals on the index day). That **does not** match the submitted Word manuscript, which describes **191 monthly** sequential trials and **OAC initiation within one month** before index (initiators vs non-initiators), with numbers such as 8,230 eligible patient-trials and 81 initiators.
 
-The new pipeline below defaults to **`manuscript_initiator` + `month`** so the **methods align with the Word file**. Exact numerical reproduction also depends on the same input `.RDS` files and on analysis choices (for example follow-up cap).
+The pipeline defaults to **`manuscript_initiator`** exposure and **`index_by = "day"`** (daily sequential trials and daily long person-time in 03). Set **`index_by = "month"`** to match the Word manuscript’s ~191 monthly trials and **`script/run_incident.R`** month-based person-time. Exact counts depend on input `.RDS` files and choices such as follow-up cap.
 
 ## Sequential pipeline (01–03)
 
@@ -16,9 +16,9 @@ Run each step from the **project root** (where `data/` and `documents/` live). S
 |------|------|
 | `script/analysis_config.R` | `analysis_config` list + `load_analysis_config()` |
 | `script/00_functions_pd_oac.R` | Shared helpers: index dates, OAC/antiplatelet prep, `make_run_seq()`, CHA₂DS₂-VASc (`compute_chadsvas_score()`), baseline antiplatelet merge, TableOne factor/SMD helpers, `project_root()` |
-| `script/01_build_seqcohort.R` | Build and save the sequential trial list + cached monthly antiplatelet for index merges |
+| `script/01_build_seqcohort.R` | Build and save the sequential trial list + cached antiplatelet at index (month- or day-level per `index_by`) |
 | `script/02_analysis_primary.R` | Wide `person_trial`, Table 1, MatchIt (1:10 by default), CSV + RDS outputs |
-| `script/03_regression_pooled_logistic.R` | Monthly person-time, time-varying antiplatelet, SMD-adjusted `speedglm` (optional), cluster bootstrap RD/RR like `run_incident.R` (optional) |
+| `script/03_regression_pooled_logistic.R` | Long person-time (`index_by`: day or month), time-varying antiplatelet, SMD-adjusted `speedglm` (optional), cluster bootstrap RD/RR (optional) |
 | `script/bootstrap_pooled_run_incident.R` | Sourced by 03: `std.boot`, `calculate_risk`, `orgnize_ci` (same logic as `script/run_incident.R` ~51–158) |
 
 ```bash
@@ -49,8 +49,15 @@ analysis_config$path_seqcohort_rds <- NULL  # auto name from mode + index_by
 cfg <- load_analysis_config()
 ```
 
-- **`manuscript_initiator`**: prevalent OAC exclusion (`date.oac` ≤ index − 1 month); `expo` from first OAC in (index − 1 month, index]; uses cohort `date.oac`.
+- **`manuscript_initiator`**: prevalent OAC exclusion (`date.oac` ≤ index − 1 month); `expo` from first OAC in (index − `oac_initiation_lookback_months`, index]; uses cohort `date.oac`.
 - **`current_oac_interval`**: no prevalent exclusion; `expo` from OAC prescription intervals (`prepare_drug_oac()`). Matches the **logic** of the current `script/run.R` when index is daily.
+
+**`index_by`** (`"day"` default, or `"month"`):
+
+- **`day`**: `01` builds one trial per calendar day between `study_start` and `study_end` (after `drop_first_index`); `03` expands each matched person-trial to **one row per day** from index to `obs_end`. **Much larger** row counts and runtime than monthly.
+- **`month`**: one trial per month (~191 after dropping the first index); `03` uses **one row per calendar month** (aligned with **`script/run_incident.R`** person-time).
+
+For **`index_by = "day"`**, step **03** (especially **`regression_run_bootstrap`**) can be **very slow**; reduce **`bootstrap_r`** while testing.
 
 **`pipeline_style`** (in `analysis_config`):
 
@@ -62,7 +69,7 @@ cfg <- load_analysis_config()
 ## Regression (`script/03_regression_pooled_logistic.R`)
 
 - **`script/02_analysis_primary.R`** stops after MatchIt and Table 1 (matched wide cohort). It does **not** run outcome regression.
-- **`script/03_regression_pooled_logistic.R`** expands to **monthly person-time** from `indx_date` to `obs_end`, merges **time-varying antiplatelet**, defines **`out`**, then:
+- **`script/03_regression_pooled_logistic.R`** expands to **long person-time** (day or month steps per `index_by`) from `indx_date` to `obs_end`, merges **time-varying antiplatelet**, defines **`out`**, then:
   - **`speedglm`** (optional): pooled logistic coefficients with `expo` + `time` + `timesqr` and SMD-based adjustment — when **`regression_run_speedglm = TRUE`**.
   - **Cluster bootstrap RD/RR** (optional): same pattern as **`script/run_incident.R`** (~700–772) — resample **`id`**, fit **`speedglm`** with RR and RD formulas, g-computation over follow-up — when **`pipeline_style = "run_incident"`** and **`regression_run_bootstrap = TRUE`**. Replicates **`bootstrap_r`** (default **500**) and **`bootstrap_seed`** (default **456**).
 

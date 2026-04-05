@@ -1,4 +1,4 @@
-# 03_regression_pooled_logistic.R — monthly person-time + pooled logistic + bootstrap
+# 03_regression_pooled_logistic.R — long person-time + pooled logistic + bootstrap
 # Run after 02_analysis_primary.R.
 #
 # pipeline_style "run_incident": long-format SMD, speedglm coefs (optional), and/or
@@ -40,7 +40,7 @@ if (run_sg || run_boot) {
 if (run_boot) {
   suppressPackageStartupMessages(library(splitstackshape))
 }
-message("pipeline_style: ", cfg$pipeline_style)
+message("pipeline_style: ", cfg$pipeline_style, " | index_by: ", cfg$index_by)
 message(
   "regression_run_speedglm: ", run_sg,
   " | regression_run_bootstrap: ", run_boot
@@ -117,9 +117,10 @@ if (cfg$pipeline_style != "run_incident" && run_sg) {
   unbalanced_variable <- character(0)
 }
 
-# --- Monthly person-time (same structure as script/run_incident.R) ------------
+# --- Long person-time (`index_by`: day or month; run_incident uses month) -------
+seq_step <- long_person_time_seq_by(cfg)
 long_format <- person_trial[, .(id, indx_date, obs_end)][,
-  .(obs_date = seq.Date(indx_date, obs_end, by = "1 month")),
+  .(obs_date = seq.Date(indx_date, obs_end, by = seq_step)),
   by = id]
 long_format[, time := seq_len(.N) - 1L, by = id]
 long_format[, timesqr := time^2]
@@ -130,7 +131,11 @@ if (!"dob" %in% names(person_trial)) {
 }
 person_trial[, age_indx := as.numeric((obs_date - ymd(dob) + 1L) / 365.25)]
 compute_chadsvas_score(person_trial)
-person_trial[, time_af_index := interval(date.af, obs_date) %/% months(1L)]
+if (cfg$index_by == "day") {
+  person_trial[, time_af_index := as.integer(obs_date - date.af)]
+} else {
+  person_trial[, time_af_index := interval(date.af, obs_date) %/% months(1L)]
+}
 person_trial[, fu := as.numeric(obs_date - indx_date)]
 
 message("outcome_definition = ", cfg$outcome_definition)
@@ -194,8 +199,8 @@ person_trial[, antiplatelet := ifelse(is.na(antiplatelet), 0L, 1L)]
 # --- SMD / unbalanced (run_incident: after tv antiplatelet) -------------------
 if (cfg$pipeline_style == "run_incident" && (run_sg || run_boot)) {
   message(
-    "SMD for pooled models uses long-format data. Person-month rows: ",
-    nrow(person_trial), ". See ", cfg$path_tableone_long_smd_csv
+    "SMD for pooled models uses long-format data (index_by=", cfg$index_by,
+    "). Rows: ", nrow(person_trial), ". See ", cfg$path_tableone_long_smd_csv
   )
   ut <- person_trial[, .(n_unique_ids = uniqueN(id)), by = expo]
   message(
@@ -392,11 +397,19 @@ if (run_sg) {
 
 # --- Bootstrap RD/RR (script/run_incident.R ~700–772) -------------------------
 year <- cfg$obs_end_cap_years
-K <- year * 12L
+n_gcomp <- gcomputation_n_steps(cfg)
+K <- n_gcomp
 R_boot <- cfg$bootstrap_r
 out_boot <- NULL
 
 if (cfg$pipeline_style == "run_incident" && run_boot) {
+  options(
+    bootstrap_person_time_label = if (cfg$index_by == "day") {
+      "person-days"
+    } else {
+      "person-months"
+    }
+  )
   source(file.path(root, "script/bootstrap_pooled_run_incident.R"))
   set.seed(cfg$bootstrap_seed)
 
@@ -462,7 +475,10 @@ if (run_sg) {
   message("Saved (speedglm all terms): ", cfg$path_est_pooled_all_csv)
 }
 
-message("Rows (person-months): ", nrow(person_trial))
+message(
+  "Rows (long format, index_by=", cfg$index_by, "): ",
+  nrow(person_trial)
+)
 if (run_sg) {
   message("Exposure OR — speedglm (SMD-adjusted formulas):\n")
   print(est_expo)

@@ -162,6 +162,28 @@ tableone_smd_to_dt <- function(tab_obj, nonnormal = NULL, var_labels = TRUE) {
   )
 }
 
+#' `seq.Date` step for long person-time in 03 (`"1 day"` or `"1 month"`).
+long_person_time_seq_by <- function(cfg) {
+  if (!cfg$index_by %in% c("day", "month")) {
+    stop('analysis_config index_by must be "day" or "month".')
+  }
+  if (cfg$index_by == "day") {
+    "1 day"
+  } else {
+    "1 month"
+  }
+}
+
+#' Horizon length for g-computation in bootstrap (matches `obs_end_cap_years`).
+#' Monthly index: 12 steps per year; daily index: ~365.25 days per year.
+gcomputation_n_steps <- function(cfg) {
+  if (cfg$index_by == "day") {
+    as.integer(floor(365.25 * cfg$obs_end_cap_years))
+  } else {
+    as.integer(cfg$obs_end_cap_years * 12L)
+  }
+}
+
 #' Build calendar index dates from config
 build_index_dates <- function(cfg) {
   by_unit <- if (cfg$index_by == "month") "month" else "day"

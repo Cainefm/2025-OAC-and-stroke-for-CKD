@@ -1,5 +1,6 @@
 # bootstrap_pooled_run_incident.R — pooled RD/RR bootstrap (script/run_incident.R ~51–158)
-# Globals used: person_trial, formula_rr, formula_rd, year, K, current_bootstrap, pb
+# Globals: person_trial, formula_rr, formula_rd, n_gcomp, K, current_bootstrap, pb
+# (n_gcomp = horizon steps: 12 * years if monthly index, ~365.25 * years if daily.)
 
 std.boot <- function(data, indices) {
   current_bootstrap <<- current_bootstrap + 1L
@@ -57,9 +58,9 @@ calculate_risk <- function(dt, formula, type) {
 
   base_data <- splitstackshape::expandRows(
     dt[time == 0, ],
-    count = year * 12L,
+    count = n_gcomp,
     count.is.col = FALSE
-  )[, time := rep(0:(year * 12L - 1L), dt[time == 0, .N])][, timesqr := time^2]
+  )[, time := rep(0:(n_gcomp - 1L), dt[time == 0, .N])][, timesqr := time^2]
 
   control <- data.table::copy(base_data)[, expo := 0][,
     p_event := predict(model, .SD, type = "response")
@@ -124,7 +125,9 @@ orgnize_ci <- function(x, model_type, ids) {
   num <- transpose(
     as.data.table(rbind(
       as.data.frame(
-        person_trial[id %in% ids$id, .N, expo][, num.of.p := "person-months"]
+        person_trial[id %in% ids$id, .N, expo][,
+          num.of.p := getOption("bootstrap_person_time_label", "person-periods")
+        ]
       ),
       as.data.frame(
         person_trial[id %in% ids$id, ][

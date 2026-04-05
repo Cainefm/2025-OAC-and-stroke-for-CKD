@@ -17,8 +17,9 @@ analysis_config <- list(
   # does NOT do this; it relies on pt.allstroke==0 in 02. Keep FALSE for Word parity.
   cohort_exclude_dx_stroke_embo = FALSE,
 
-  # "month" = 191 trials (after drop_first_index); "day" = daily index dates.
-  index_by = "month",
+  # "month" = one trial per calendar month (~191 after drop_first_index).
+  # "day" = one trial per calendar day (large; use for daily person-time in 03).
+  index_by = "day",
 
   study_start = as.Date("2007-01-01"),
   study_end = as.Date("2022-12-31"),
@@ -115,6 +116,12 @@ load_analysis_config <- function(root = ".") {
   }
   if (is.null(cfg$bootstrap_seed)) {
     cfg$bootstrap_seed <- 456L
+  }
+  if (is.null(cfg$index_by)) {
+    cfg$index_by <- "day"
+  }
+  if (!cfg$index_by %in% c("day", "month")) {
+    stop('analysis_config: index_by must be "day" or "month".')
   }
   cfg
 }
