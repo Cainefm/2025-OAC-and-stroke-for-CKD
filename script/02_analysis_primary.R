@@ -34,7 +34,7 @@ seqcohort <- read_seqcohort_with_trial_ids(
   file.path(root, cfg$path_seqcohort_rds)
 )
 
-person_trial <- rbindlist(seqcohort)
+person_trial <- rbindlist(seqcohort, fill = T)
 person_trial[, id := paste(trial_id, Reference_Key, sep = "-")]
 
 demo <- as.data.table(readRDS(file.path(root, cfg$path_demo_rds)))
