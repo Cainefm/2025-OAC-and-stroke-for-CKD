@@ -95,7 +95,9 @@ if (cfg$pipeline_style == "run_incident") {
   )]
 }
 
-person_trial[, age_indx := as.numeric((indx_date - ymd(dob)) / 365.25)]
+person_trial[, age_indx := suppressWarnings(as.numeric(
+  (as.Date(indx_date) - as.Date(lubridate::ymd(dob))) / 365.25
+))]
 person_trial[, time_af_index := as.numeric(indx_date - date.af)]
 compute_chadsvas_score(person_trial)
 
@@ -129,26 +131,16 @@ covar <- setDT(readxl::read_xlsx(
   file.path(root, cfg$path_protocol_xlsx),
   sheet = cfg$protocol_covar_sheet
 ))
-for (i in seq_len(nrow(covar))) {
-  vn <- covar[i, Name]
-  vl <- covar[i, Description]
-  if (vn %in% names(person_trial)) {
-    var_label(person_trial[[vn]]) <- vl
-  }
-}
-var_label(person_trial[["age_indx"]]) <- "Age at index date (Years)"
-var_label(person_trial[["time_af_index"]]) <- "Time from AF to Index date (Days)"
-var_label(person_trial[["chadsvas_score"]]) <- "CHA₂DS₂-VASc Score"
-var_label(person_trial[["antiplatelet.baseline"]]) <- "Antiplatelet user history"
-var_label(person_trial[["fu"]]) <- "Follow-up period"
-var_label(person_trial)
+apply_protocol_var_labels(person_trial, covar)
+set_core_var_labels(person_trial)
+flatten_scalar_list_cols(person_trial)
 
 notnormal <- intersect(c("age_indx", "time_af_index", "fu"), vars)
 tabone <- CreateTableOne(
   vars = vars,
   factorVars = tableone_factor_vars(vars),
   strata = "expo",
-  data = person_trial,
+  data = prep_for_tableone(person_trial, "expo", vars),
   test = FALSE
 )
 tableone_b4_matching <- as.data.table(
@@ -199,12 +191,13 @@ if (cfg$pipeline_style == "run_incident") {
 }
 print(summary(m.out))
 
-person_trial <- match.data(m.out)
+person_trial <- as.data.table(match.data(m.out))
+flatten_scalar_list_cols(person_trial)
 tabone2 <- CreateTableOne(
   vars = vars,
   factorVars = tableone_factor_vars(vars),
   strata = "expo",
-  data = person_trial,
+  data = prep_for_tableone(person_trial, "expo", vars),
   test = FALSE
 )
 tableone_after_matching <- as.data.table(

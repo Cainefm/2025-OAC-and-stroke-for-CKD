@@ -129,7 +129,9 @@ person_trial <- merge(person_trial, long_format, by = "id", all.x = TRUE)
 if (!"dob" %in% names(person_trial)) {
   stop("Need dob on person_trial (from PD_OAC-demo merge in 02).")
 }
-person_trial[, age_indx := as.numeric((obs_date - ymd(dob) + 1L) / 365.25)]
+person_trial[, age_indx := suppressWarnings(as.numeric(
+  (as.Date(obs_date) - as.Date(ymd(dob)) + 1L) / 365.25
+))]
 compute_chadsvas_score(person_trial)
 if (cfg$index_by == "day") {
   person_trial[, time_af_index := as.integer(obs_date - date.af)]
@@ -144,42 +146,53 @@ if (!all(c("date.ische", "date.haem", "date.death") %in% names(person_trial))) {
 }
 
 if (cfg$outcome_definition == "pmin_composite") {
-  if (cfg$pipeline_style == "run_incident") {
-    person_trial[, out := ifelse(
-      pmin(date.ische, date.haem, date.death, na.rm = TRUE) >= obs_date &
-        substring(
-          pmin(date.ische, date.haem, date.death, na.rm = TRUE), 1L, 7L
-        ) == substring(obs_date, 1L, 7L),
-      1, 0
-    )]
-    person_trial[, out := ifelse(is.na(out), 0, out)]
-    person_trial[, out := as.integer(out)]
-  } else {
-    person_trial[, t_evt := pmin(date.ische, date.haem, date.death, na.rm = TRUE)]
+  # script/run_incident.R uses one row per month; out=1 iff first event is in the
+  # same calendar month as obs_date and on/after obs_date. With index_by="day",
+  # that same rule marks almost every earlier day in the month as an "event"
+  # interval, which explodes the pooled hazard and drives g-computation risk to
+  # ~1. Daily person-time needs exactly one event day: t_evt == obs_date.
+  person_trial[, t_evt := pmin(date.ische, date.haem, date.death, na.rm = TRUE)]
+  if (cfg$index_by == "day") {
     person_trial[, out := fifelse(
-      is.na(t_evt) | !is.finite(t_evt),
+      is.na(t_evt),
+      0L,
+      as.integer(t_evt == obs_date)
+    )]
+  } else {
+    person_trial[, out := fifelse(
+      is.na(t_evt),
       0L,
       as.integer(
         t_evt >= obs_date &
           substring(t_evt, 1L, 7L) == substring(obs_date, 1L, 7L)
       )
     )]
-    person_trial[, t_evt := NULL]
   }
+  person_trial[, t_evt := NULL]
 } else if (cfg$outcome_definition == "any_event_same_month") {
-  person_trial[, out := 0L]
-  person_trial[, out := fifelse(
-    !is.na(date.ische) &
-      format(date.ische, "%Y-%m") == format(obs_date, "%Y-%m") &
-      date.ische >= obs_date, 1L, out)]
-  person_trial[, out := fifelse(
-    !is.na(date.haem) &
-      format(date.haem, "%Y-%m") == format(obs_date, "%Y-%m") &
-      date.haem >= obs_date, 1L, out)]
-  person_trial[, out := fifelse(
-    !is.na(date.death) &
-      format(date.death, "%Y-%m") == format(obs_date, "%Y-%m") &
-      date.death >= obs_date, 1L, out)]
+  if (cfg$index_by == "day") {
+    person_trial[, out := 0L]
+    person_trial[, out := fifelse(
+      !is.na(date.ische) & date.ische == obs_date, 1L, out)]
+    person_trial[, out := fifelse(
+      !is.na(date.haem) & date.haem == obs_date, 1L, out)]
+    person_trial[, out := fifelse(
+      !is.na(date.death) & date.death == obs_date, 1L, out)]
+  } else {
+    person_trial[, out := 0L]
+    person_trial[, out := fifelse(
+      !is.na(date.ische) &
+        format(date.ische, "%Y-%m") == format(obs_date, "%Y-%m") &
+        date.ische >= obs_date, 1L, out)]
+    person_trial[, out := fifelse(
+      !is.na(date.haem) &
+        format(date.haem, "%Y-%m") == format(obs_date, "%Y-%m") &
+        date.haem >= obs_date, 1L, out)]
+    person_trial[, out := fifelse(
+      !is.na(date.death) &
+        format(date.death, "%Y-%m") == format(obs_date, "%Y-%m") &
+        date.death >= obs_date, 1L, out)]
+  }
 } else {
   stop("Unknown outcome_definition: ", cfg$outcome_definition)
 }

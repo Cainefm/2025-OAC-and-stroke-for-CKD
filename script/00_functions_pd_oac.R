@@ -9,20 +9,102 @@ project_root <- function() {
   "."
 }
 
-#' CHA2DS2-VASc components from `age_indx` (years) and comorbidity columns on `dt`.
+#' CHA2DS2-VASc score (age bands match prior code: gap at exactly 75 years).
 compute_chadsvas_score <- function(dt) {
-  dt[, chadsvas_score := dplyr::case_when(
-    age_indx < 65 ~ 0,
-    age_indx >= 65 & age_indx < 75 ~ 1,
-    age_indx > 75 ~ 2
-  ) + ifelse(Sex == "F", 1L, 0L) + dx.chf + dx.htn + dx.cbd +
-    dx.stroke_embo * 2L + dx.pvd + dx.dm]
+  dt[, age_indx := suppressWarnings(as.numeric(as.vector(age_indx)))]
+  dt[, chadsvas_score := data.table::fcase(
+    is.na(age_indx), NA_integer_,
+    age_indx < 65, 0L,
+    age_indx >= 65 & age_indx < 75, 1L,
+    age_indx > 75, 2L,
+    default = NA_integer_
+  ) + data.table::fifelse(as.character(Sex) == "F", 1L, 0L) +
+    as.integer(dx.chf) + as.integer(dx.htn) + as.integer(dx.cbd) +
+    as.integer(dx.stroke_embo) * 2L + as.integer(dx.pvd) + as.integer(dx.dm)]
   invisible(dt)
 }
 
 #' Factor columns for TableOne (continuous vars excluded).
 tableone_factor_vars <- function(vars) {
   setdiff(vars, c("fu", "trial_id", "chadsvas_score", "age_indx", "time_af_index"))
+}
+
+#' In-place: turn mistaken list-of-scalars columns into atomic (Excel / labels).
+flatten_scalar_list_cols <- function(tab) {
+  n <- nrow(tab)
+  for (nm in names(tab)) {
+    v <- tab[[nm]]
+    if (!is.list(v) || inherits(v, "data.frame") || inherits(v, "POSIXlt")) {
+      next
+    }
+    if (length(v) != n) {
+      next
+    }
+    if (!all(lengths(v) == 1L)) {
+      stop("Column ", nm, ": list cells must be length 1 (see protocol xlsx).")
+    }
+    val <- unlist(v, use.names = FALSE)
+    if (inherits(tab, "data.table")) {
+      tab[, (nm) := val]
+    } else {
+      tab[[nm]] <- val
+    }
+  }
+  invisible(tab)
+}
+
+#' data.frame for CreateTableOne: strip haven labels and list wrappers.
+prep_for_tableone <- function(dt, strata, vars) {
+  cols <- intersect(unique(c(strata, vars)), names(dt))
+  sub <- if (inherits(dt, "data.table")) {
+    dt[, cols, with = FALSE]
+  } else {
+    dt[, cols, drop = FALSE]
+  }
+  out <- as.data.frame(sub)
+  if (requireNamespace("haven", quietly = TRUE)) {
+    out <- haven::zap_labels(out)
+  } else {
+    for (j in seq_len(ncol(out))) {
+      if (inherits(out[[j]], "labelled")) {
+        out[[j]] <- as.vector(out[[j]])
+      }
+    }
+  }
+  flatten_scalar_list_cols(out)
+  out
+}
+
+#' Apply protocol xlsx Name / Description as variable labels.
+apply_protocol_var_labels <- function(person_trial, covar) {
+  for (i in seq_len(nrow(covar))) {
+    nm <- trimws(as.character(covar[["Name"]][i]))
+    desc <- paste(
+      as.character(unlist(covar[["Description"]][i], use.names = FALSE)),
+      collapse = " "
+    )
+    if (nzchar(nm) && nm %in% names(person_trial)) {
+      var_label(person_trial[[nm]]) <- desc
+    }
+  }
+  invisible(person_trial)
+}
+
+#' Override labels for core Table-1 columns.
+set_core_var_labels <- function(person_trial) {
+  core <- c(
+    age_indx = "Age at index date (Years)",
+    time_af_index = "Time from AF to Index date (Days)",
+    chadsvas_score = "CHA₂DS₂-VASc Score",
+    antiplatelet.baseline = "Antiplatelet user history",
+    fu = "Follow-up period"
+  )
+  for (nm in names(core)) {
+    if (nm %in% names(person_trial)) {
+      var_label(person_trial[[nm]]) <- core[[nm]]
+    }
+  }
+  invisible(person_trial)
 }
 
 #' Read seqcohort list and attach `trial_id` per trial.

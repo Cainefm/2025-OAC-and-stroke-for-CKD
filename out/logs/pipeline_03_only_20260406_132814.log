@@ -1,0 +1,5 @@
+- One or more packages recorded in the lockfile are not installed.
+- Use `renv::status()` for more details.
+Error in library(broom) : there is no package called ‘broom’
+Calls: suppressPackageStartupMessages -> withCallingHandlers -> library
+Execution halted
